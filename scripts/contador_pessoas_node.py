@@ -16,9 +16,9 @@ class PersonCounterNode:
         # Inicializa nó ROS
         rospy.init_node('person_counter', anonymous=False)
 
-        # Obtém caminho padrão do modelo dentro do pacote 'contadorPessoas'
+        # Obtém caminho padrão do modelo dentro do pacote 'contador_pessoas'
         rospack = rospkg.RosPack()
-        pkg_path = rospack.get_path('contadorPessoas')
+        pkg_path = rospack.get_path('contador_pessoas')
         default_model = os.path.join(pkg_path, 'models', 'yolov8n.pt')
 
         # Parâmetro para caminho do modelo (pode ser sobrescrito via launch)
