@@ -1,87 +1,101 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+# ------------------------- IMPORTAÇÕES ------------------------- #
 import rospy
-import rospkg
-from sensor_msgs.msg import Image
-from std_msgs.msg import Int32
-from cv_bridge import CvBridge, CvBridgeError
+import cv2
+import numpy as np
 from ultralytics import YOLO
 import supervision as sv
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
+from std_msgs.msg import Int32
 
+# ----------------------- CLASSE DO NÓ ROS ------------------------ #
 
-class PersonCounterNode:
+class PeopleCounter:
     def __init__(self):
-        # Inicializa nó ROS
-        rospy.init_node('person_counter', anonymous=False)
+        # --- Inicialização do Nó ---
+        rospy.init_node('people_counter_node', anonymous=True)
+        rospy.loginfo("Nó de contagem de pessoas iniciado.")
 
-        # Obtém caminho padrão do modelo dentro do pacote 'contador_pessoas'
-        rospack = rospkg.RosPack()
-        pkg_path = rospack.get_path('contador_pessoas')
-        default_model = os.path.join(pkg_path, 'models', 'yolov8n.pt')
-
-        # Parâmetro para caminho do modelo (pode ser sobrescrito via launch)
-        model_path = rospy.get_param('~model_path', default_model)
-        imgsz = rospy.get_param('~imgsz', 640)
-
-        # Carrega modelo YOLO
-        rospy.loginfo(f"Carregando YOLO a partir de {model_path}...")
+        # --- Carregamento do Modelo YOLO ---
+        # O caminho agora aponta para a pasta 'models' dentro do nosso pacote.
+        # Supondo que o Dockerfile copie o pacote para /root/catkin_ws/src/
+        #model_path = rospy.get_param('~model_path', '/root/catkin_ws/src/contador_pessoas/models/yolov8n.pt')
+        model_path = rospy.get_param('~model_path', '/home/lakan/catkin_ws/src/contador_pessoas/models/yolov8n.pt')
         self.model = YOLO(model_path)
-        rospy.loginfo("Modelo carregado com sucesso.")
+        rospy.loginfo(f"Modelo YOLO carregado de: {model_path}")
 
-        # Bridge para conversão ROS2cv
-        self.bridge = CvBridge()
-
-        # Publicador do número de pessoas
-        self.pub_count = rospy.Publisher('/person_count', Int32, queue_size=1)
-
-        # Anotadores opcionais
+        # --- Inicializadores do Supervision e CvBridge ---
         self.box_annotator = sv.BoundingBoxAnnotator(thickness=2)
         self.label_annotator = sv.LabelAnnotator(text_scale=1, text_thickness=2)
+        self.bridge = CvBridge()
 
-        # Assina tópico de imagem
-        self.sub_image = rospy.Subscriber(
-            '/camera/color/image_raw', Image,
-            self.image_callback,
-            queue_size=1,
-            buff_size=2**24
-        )
+        # --- Publishers (Publicadores) ---
+        # Publica a imagem com as detecções para visualização (debug)
+        self.image_pub = rospy.Publisher("/person_detector/image_annotated", Image, queue_size=1)
+        # Publica o número de pessoas detectadas
+        self.count_pub = rospy.Publisher("/person_detector/person_count", Int32, queue_size=1)
 
-        rospy.loginfo("Aguardando imagens em /camera/color/image_raw...")
+        # --- Subscriber (Assinante) ---
+        # Assina o tópico de imagem da câmera do robô.
+        # IMPORTANTE: Altere '/camera/image_raw' para o tópico real da câmera do seu robô.
+        #self.image_sub = rospy.Subscriber("/camera/color/image_raw/image_topics", Image, self.image_callback, queue_size=1, buff_size=2**24)
+        self.image_sub = rospy.Subscriber("/camera/color/image_raw", Image, self.image_callback, queue_size=1, buff_size=2**24)
 
-    def image_callback(self, msg: Image):
+    def image_callback(self, msg):
+        """
+        Função chamada toda vez que uma nova imagem chega no tópico da câmera.
+        """
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            # Converte a mensagem de imagem do ROS para um frame do OpenCV
+            cv_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except CvBridgeError as e:
-            rospy.logerr(f"Erro ao converter imagem: {e}")
+            rospy.logerr(f"CvBridge Error: {e}")
             return
 
-        # Detecção YOLO
-        results = self.model(frame, imgsz=self.model.args.imgsz or 640, verbose=False)[0]
+        # --- Lógica de Detecção (quase idêntica à sua original) ---
+        results = self.model(cv_frame, imgsz=640, verbose=False)[0]
         detections = sv.Detections.from_ultralytics(results)
-        person_dets = detections[detections.class_id == 0]
-        count = len(person_dets)
+        
+        # Filtra apenas detecções da classe 'pessoa' (class_id == 0)
+        detections = detections[detections.class_id == 0]
 
-        # Publica e log
-        self.pub_count.publish(count)
-        rospy.loginfo(f"Pessoas detectadas neste frame: {count}")
+        # Gera rótulos
+        labels = [
+            f"{self.model.names[class_id]} {confidence:0.2f}"
+            for _, _, confidence, class_id, _, _ in detections
+        ]
 
-        # Para visualização (opcional)
-        # labels = [f"{self.model.names[cid]} {conf:0.2f}" for *_, conf, cid, *_ in person_dets]
-        # frame = self.box_annotator.annotate(scene=frame, detections=person_dets)
-        # frame = self.label_annotator.annotate(scene=frame, detections=person_dets, labels=labels)
-        # cv2.imshow("Detecção de Pessoas", frame)
-        # cv2.waitKey(1)
+        # Anota o frame com as caixas e rótulos
+        annotated_frame = self.box_annotator.annotate(scene=cv_frame.copy(), detections=detections)
+        annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+
+        # --- Publicação dos Resultados ---
+        
+        # 1. Publica o número de pessoas
+        person_count = len(detections)
+        self.count_pub.publish(Int32(person_count))
+
+        # 2. Publica a imagem anotada
+        try:
+            ros_image_annotated = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
+            self.image_pub.publish(ros_image_annotated)
+        except CvBridgeError as e:
+            rospy.logerr(f"CvBridge Error: {e}")
 
     def run(self):
+        """
+        Mantém o nó em execução.
+        """
         rospy.spin()
-        # cv2.destroyAllWindows()
 
+# ----------------------- PONTO DE ENTRADA DO SCRIPT ------------------------ #
 
 if __name__ == '__main__':
     try:
-        node = PersonCounterNode()
-        node.run()
+        counter = PeopleCounter()
+        counter.run()
     except rospy.ROSInterruptException:
         pass
